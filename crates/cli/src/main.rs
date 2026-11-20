@@ -302,23 +302,30 @@ fn execute_target(name: &str, target: &Target, root: &Path, cancellation: &Atomi
     match target.kind.as_str() {
         "command" => {
             for command in &target.commands {
-                let mut process = if cfg!(target_os = "windows") {
-                    Command::new("cmd").args(["/C", command]).current_dir(root).stdin(Stdio::null()).spawn()?
+                let mut command_builder = if cfg!(target_os = "windows") {
+                    let mut builder = Command::new("cmd");
+                    builder.args(["/C", command]);
+                    builder
                 } else {
-                    Command::new("sh").args(["-c", command]).current_dir(root).stdin(Stdio::null()).spawn()?
+                    let mut builder = Command::new("sh");
+                    builder.args(["-c", command]);
+                    builder
                 };
+                command_builder.current_dir(root).stdin(Stdio::null());
+                let mut process = spawn_isolated(command_builder)?;
                 wait_for_process(&mut process, target.timeout_ms, cancellation)
                     .with_context(|| format!("command failed: {command}"))?;
             }
         }
         "exec" => {
             let program = target.program.as_deref().context("missing executable program")?;
-            let mut process = Command::new(program)
+            let mut command = Command::new(program);
+            command
                 .args(&target.args)
                 .envs(&target.env)
                 .current_dir(root)
-                .stdin(Stdio::null())
-                .spawn()
+                .stdin(Stdio::null());
+            let mut process = spawn_isolated(command)
                 .with_context(|| format!("starting executable '{program}'"))?;
             wait_for_process(&mut process, target.timeout_ms, cancellation)
                 .with_context(|| format!("executable '{program}' failed"))?;
@@ -334,22 +341,42 @@ fn execute_target(name: &str, target: &Target, root: &Path, cancellation: &Atomi
     Ok(())
 }
 
+fn spawn_isolated(mut command: Command) -> Result<Child> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command.spawn()
+}
+
+fn terminate_process_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let process_group = child.id() as i32;
+        // Each action owns a fresh process group; signal only that target's tree.
+        unsafe {
+            libc::kill(-process_group, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn wait_for_process(child: &mut Child, timeout_ms: Option<u64>, cancellation: &AtomicBool) -> Result<()> {
     let started = Instant::now();
     loop {
         if cancellation.load(Ordering::SeqCst) {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("process cancelled because another build action failed");
+            terminate_process_tree(child);
+            bail!("process tree cancelled because another build action failed");
         }
         if let Some(status) = child.try_wait()? {
             if !status.success() { bail!("process exited with status {status}"); }
             return Ok(());
         }
         if timeout_ms.is_some_and(|limit| started.elapsed() >= Duration::from_millis(limit)) {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("process exceeded timeout of {} ms", timeout_ms.unwrap());
+            terminate_process_tree(child);
+            bail!("process tree exceeded timeout of {} ms", timeout_ms.unwrap());
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -468,7 +495,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn process_timeout_kills_child() {
-        let mut child = Command::new("sleep").arg("2").spawn().unwrap();
+        let mut command = Command::new("sleep");
+        command.arg("2");
+        let mut child = spawn_isolated(command).unwrap();
         let error = wait_for_process(&mut child, Some(10), &AtomicBool::new(false)).unwrap_err();
         assert!(error.to_string().contains("timeout"));
         assert!(child.try_wait().unwrap().is_some());
@@ -477,11 +506,50 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cancellation_stops_a_running_child() {
-        let mut child = Command::new("sleep").arg("2").spawn().unwrap();
+        let mut command = Command::new("sleep");
+        command.arg("2");
+        let mut child = spawn_isolated(command).unwrap();
         let cancellation = AtomicBool::new(true);
         let error = wait_for_process(&mut child, None, &cancellation).unwrap_err();
         assert!(error.to_string().contains("cancelled"));
         assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cancellation_kills_descendant_processes() {
+        use std::{thread, time::Duration};
+
+        let directory = std::env::temp_dir().join(format!("wportage-process-tree-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let pid_file = directory.join("descendant.pid");
+        let script = format!("sleep 30 & echo $! > '{}' ; wait", pid_file.display());
+        let mut command = Command::new("sh");
+        command.args(["-c", &script]);
+        let mut child = spawn_isolated(command).unwrap();
+
+        for _ in 0..100 {
+            if pid_file.exists() { break; }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let descendant_pid: i32 = fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        let error = wait_for_process(&mut child, None, &AtomicBool::new(true)).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+
+        let status_path = format!("/proc/{descendant_pid}/stat");
+        for _ in 0..100 {
+            match fs::read_to_string(&status_path) {
+                Ok(stat) if stat.split_whitespace().nth(2) == Some("Z") => break,
+                Err(_) => break,
+                _ => thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        let still_running = fs::read_to_string(&status_path)
+            .ok()
+            .and_then(|stat| stat.split_whitespace().nth(2).map(str::to_owned))
+            .is_some_and(|state| state != "Z");
+        assert!(!still_running, "descendant process {descendant_pid} is still running");
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
