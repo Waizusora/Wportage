@@ -21,7 +21,7 @@ Two action types are currently supported:
 - `exec`: starts a program directly with an argument vector and declared environment variables. No shell parsing is involved.
 - `command`: executes shell command strings through the host command interpreter. This is intentionally retained as an escape hatch.
 
-The current executor does not yet model declared outputs, cache keys, incremental state, process groups, sandbox policies, or toolchain identities. Parallel scheduling is not a claim of hermetic or reproducible execution.
+The executor now accepts optional `outputs = ["relative/path"]` declarations per target. Output paths must be workspace-relative and cannot traverse outside the project. Before execution, the reachable graph is checked for overlapping output paths; after each action, every declared output must exist. This prevents concurrent targets from claiming the same artifact path. The current executor still does not model declared inputs, cache keys, incremental state, process groups, sandbox policies, or toolchain identities. Parallel scheduling is not a claim of hermetic or reproducible execution.
 
 ## Planned subsystem boundaries
 
