@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::{
@@ -22,9 +22,16 @@ enum Commands {
     /// Build a target (defaults to the manifest's default target).
     Build {
         target: Option<String>,
+        /// Maximum number of independent targets to execute concurrently.
+        #[arg(short = 'j', long = "jobs", default_value_t = default_jobs())]
+        jobs: usize,
     },
     /// Run the manifest's test target, or all targets marked as tests.
-    Test,
+    Test {
+        /// Maximum number of independent targets to execute concurrently.
+        #[arg(short = 'j', long = "jobs", default_value_t = default_jobs())]
+        jobs: usize,
+    },
     /// Remove generated build artifacts.
     Clean,
     /// Print the target dependency graph.
@@ -65,12 +72,21 @@ struct Target {
     #[serde(default)]
     commands: Vec<String>,
     #[serde(default)]
+    program: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
     test: bool,
 }
 
 fn default_target() -> String { "default".into() }
 fn default_out() -> String { "target/wportage".into() }
 fn default_type() -> String { "command".into() }
+fn default_jobs() -> usize {
+    std::thread::available_parallelism().map(usize::from).unwrap_or(1)
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -83,19 +99,19 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Init { path } => init(path.unwrap_or_else(|| PathBuf::from("."))),
-        Commands::Build { target } => {
+        Commands::Build { target, jobs } => {
             let (manifest, root) = load_manifest()?;
             let selected = target.unwrap_or_else(|| manifest.project.default_target.clone());
-            build(&manifest, &root, &selected)
+            build(&manifest, &root, &selected, jobs)
         }
-        Commands::Test => {
+        Commands::Test { jobs } => {
             let (manifest, root) = load_manifest()?;
             let tests: Vec<String> = manifest.target.iter().filter(|(_, t)| t.test).map(|(n, _)| n.clone()).collect();
             if tests.is_empty() {
-                if manifest.target.contains_key("test") { build(&manifest, &root, "test") }
+                if manifest.target.contains_key("test") { build(&manifest, &root, "test", jobs) }
                 else { bail!("no test targets found; mark a target with test = true") }
             } else {
-                for name in tests { build(&manifest, &root, &name)?; }
+                for name in tests { build(&manifest, &root, &name, jobs)?; }
                 Ok(())
             }
         }
@@ -131,14 +147,22 @@ default_target = "hello"
 [build]
 out_dir = "target/wportage"
 
+[target.prepare]
+type = "exec"
+program = "echo"
+args = ["preparing project"]
+
 [target.hello]
-type = "command"
-commands = ["echo Wportage build is working"]
+type = "exec"
+deps = ["prepare"]
+program = "echo"
+args = ["Wportage build is working"]
 
 [target.test]
-type = "command"
+type = "exec"
 test = true
-commands = ["echo Wportage test target is working"]
+program = "echo"
+args = ["Wportage test target is working"]
 "#);
     fs::write(&manifest, content)?;
     println!("created {}", manifest.display());
@@ -153,37 +177,127 @@ fn load_manifest() -> Result<(Manifest, PathBuf)> {
     if manifest.project.name.trim().is_empty() || manifest.project.version.trim().is_empty() {
         bail!("project name and version must not be empty");
     }
+    if manifest.build.out_dir.trim().is_empty() {
+        bail!("build.out_dir must not be empty");
+    }
     Ok((manifest, root))
 }
 
-fn build(manifest: &Manifest, root: &Path, selected: &str) -> Result<()> {
-    if !manifest.target.contains_key(selected) { bail!("unknown target '{selected}'"); }
+fn build(manifest: &Manifest, root: &Path, selected: &str, jobs: usize) -> Result<()> {
+    if jobs == 0 { bail!("jobs must be greater than zero"); }
     let mut ordered = Vec::new();
     let mut visiting = BTreeSet::new();
     let mut visited = BTreeSet::new();
     visit(selected, manifest, &mut visiting, &mut visited, &mut ordered)?;
-    for name in ordered {
-        let target = &manifest.target[&name];
-        if target.kind != "command" {
-            bail!("unsupported target type for {name}: {}; this release supports command", target.kind);
+
+    for name in &ordered {
+        validate_action(name, &manifest.target[name])?;
+    }
+
+    let mut completed = BTreeSet::new();
+    let mut pending = ordered;
+    while !pending.is_empty() {
+        let ready: Vec<String> = pending.iter()
+            .filter(|name| manifest.target[*name].deps.iter().all(|dep| completed.contains(dep)))
+            .take(jobs)
+            .cloned()
+            .collect();
+        if ready.is_empty() {
+            bail!("build graph cannot make progress; check dependency relationships");
         }
-        println!("==> {name}");
-        for command in &target.commands {
-            let status = if cfg!(target_os = "windows") {
-                Command::new("cmd").args(["/C", command]).current_dir(root).stdin(Stdio::null()).status()?
-            } else {
-                Command::new("sh").args(["-c", command]).current_dir(root).stdin(Stdio::null()).status()?
-            };
-            if !status.success() { bail!("target '{name}' command failed: {command}"); }
+
+        println!("==> scheduling {}", ready.join(", "));
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = ready.iter().map(|name| {
+                let name = name.clone();
+                scope.spawn(move || {
+                    let result = execute_target(&name, &manifest.target[&name], root);
+                    (name, result)
+                })
+            }).collect();
+
+            handles.into_iter().map(|handle| {
+                handle.join().unwrap_or_else(|_| {
+                    ("<worker>".to_string(), Err(anyhow!("target worker panicked")))
+                })
+            }).collect::<Vec<_>>()
+        });
+
+        for (name, result) in results {
+            result.with_context(|| format!("target '{name}' failed"))?;
+            completed.insert(name);
         }
+        let finished: BTreeSet<String> = ready.into_iter().collect();
+        pending.retain(|name| !finished.contains(name));
     }
     Ok(())
 }
 
-fn visit(name: &str, manifest: &Manifest, visiting: &mut BTreeSet<String>, visited: &mut BTreeSet<String>, ordered: &mut Vec<String>) -> Result<()> {
+fn validate_action(name: &str, target: &Target) -> Result<()> {
+    match target.kind.as_str() {
+        "command" => {
+            if target.commands.is_empty() {
+                bail!("target '{name}' has type = \"command\" but no commands");
+            }
+            if target.program.is_some() || !target.args.is_empty() {
+                bail!("target '{name}' mixes command and exec action fields");
+            }
+        }
+        "exec" => {
+            let program = target.program.as_deref().unwrap_or_default();
+            if program.trim().is_empty() {
+                bail!("target '{name}' has type = \"exec\" but no program");
+            }
+            if !target.commands.is_empty() {
+                bail!("target '{name}' mixes command and exec action fields");
+            }
+        }
+        other => bail!("unsupported target type for {name}: {other}; supported types are command and exec"),
+    }
+    Ok(())
+}
+
+fn execute_target(name: &str, target: &Target, root: &Path) -> Result<()> {
+    println!("==> {name}");
+    match target.kind.as_str() {
+        "command" => {
+            for command in &target.commands {
+                let status = if cfg!(target_os = "windows") {
+                    Command::new("cmd").args(["/C", command]).current_dir(root).stdin(Stdio::null()).status()?
+                } else {
+                    Command::new("sh").args(["-c", command]).current_dir(root).stdin(Stdio::null()).status()?
+                };
+                if !status.success() { bail!("command failed: {command}"); }
+            }
+        }
+        "exec" => {
+            let program = target.program.as_deref().context("missing executable program")?;
+            let status = Command::new(program)
+                .args(&target.args)
+                .envs(&target.env)
+                .current_dir(root)
+                .stdin(Stdio::null())
+                .status()
+                .with_context(|| format!("starting executable '{program}'"))?;
+            if !status.success() {
+                bail!("executable '{program}' exited with status {status}");
+            }
+        }
+        _ => unreachable!("actions are validated before execution"),
+    }
+    Ok(())
+}
+
+fn visit(
+    name: &str,
+    manifest: &Manifest,
+    visiting: &mut BTreeSet<String>,
+    visited: &mut BTreeSet<String>,
+    ordered: &mut Vec<String>,
+) -> Result<()> {
     if visited.contains(name) { return Ok(()); }
     if !visiting.insert(name.to_owned()) { bail!("dependency cycle detected at target '{name}'"); }
-    let target = manifest.target.get(name).with_context(|| format!("unknown dependency target '{name}'"))?;
+    let target = manifest.target.get(name).with_context(|| format!("unknown target or dependency '{name}'"))?;
     for dep in &target.deps { visit(dep, manifest, visiting, visited, ordered)?; }
     visiting.remove(name);
     visited.insert(name.to_owned());
@@ -196,6 +310,65 @@ fn doctor() -> Result<()> {
     println!("Wportage project: {} {}", manifest.project.name, manifest.project.version);
     println!("targets: {}", manifest.target.len());
     println!("host: {}-{}", std::env::consts::ARCH, std::env::consts::OS);
+    println!("parallel jobs: {}", default_jobs());
     println!("manifest: OK");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(deps: &[&str]) -> Target {
+        Target {
+            kind: "exec".into(),
+            deps: deps.iter().map(|value| (*value).to_string()).collect(),
+            commands: Vec::new(),
+            program: Some("true".into()),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            test: false,
+        }
+    }
+
+    fn manifest(targets: &[(&str, &[&str])]) -> Manifest {
+        Manifest {
+            project: Project {
+                name: "fixture".into(),
+                version: "0.1.0".into(),
+                default_target: "app".into(),
+            },
+            build: BuildConfig::default(),
+            target: targets.iter().map(|(name, deps)| ((*name).to_string(), target(deps))).collect(),
+        }
+    }
+
+    #[test]
+    fn visits_dependencies_before_dependents() {
+        let manifest = manifest(&[("app", &["lib"]), ("lib", &["base"]), ("base", &[])]);
+        let mut ordered = Vec::new();
+        visit("app", &manifest, &mut BTreeSet::new(), &mut BTreeSet::new(), &mut ordered).unwrap();
+        assert_eq!(ordered, ["base", "lib", "app"]);
+    }
+
+    #[test]
+    fn rejects_dependency_cycles() {
+        let manifest = manifest(&[("app", &["lib"]), ("lib", &["app"])]);
+        let error = visit("app", &manifest, &mut BTreeSet::new(), &mut BTreeSet::new(), &mut Vec::new()).unwrap_err();
+        assert!(error.to_string().contains("cycle"));
+    }
+
+    #[test]
+    fn rejects_unknown_dependencies() {
+        let manifest = manifest(&[("app", &["missing"])]);
+        let error = visit("app", &manifest, &mut BTreeSet::new(), &mut BTreeSet::new(), &mut Vec::new()).unwrap_err();
+        assert!(error.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn rejects_zero_jobs() {
+        let manifest = manifest(&[("app", &[])]);
+        let error = build(&manifest, Path::new("."), "app", 0).unwrap_err();
+        assert!(error.to_string().contains("jobs"));
+    }
 }
