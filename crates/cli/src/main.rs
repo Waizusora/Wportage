@@ -57,10 +57,14 @@ struct Project {
     default_target: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct BuildConfig {
     #[serde(default = "default_out")]
     out_dir: String,
+}
+
+impl Default for BuildConfig {
+    fn default() -> Self { Self { out_dir: default_out() } }
 }
 
 #[derive(Debug, Deserialize)]
