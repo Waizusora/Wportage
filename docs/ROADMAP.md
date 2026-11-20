@@ -20,7 +20,8 @@
 - [x] CLI integration coverage for dependency execution order
 - [x] CLI integration coverage for failure cancellation and missing outputs (Unix)
 - [x] Unix process-group cancellation on action failure and timeout
-- [ ] Windows Job Object process-tree cancellation
+- [x] Windows Job Object process-tree cancellation and kill-on-close cleanup
+- [x] Windows unit coverage for terminating descendant processes
 - [ ] Graceful signal propagation and configurable shutdown grace periods
 - [ ] Cross-platform scheduler integration coverage (Windows)
 
