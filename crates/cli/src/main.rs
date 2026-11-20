@@ -5,7 +5,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
+    sync::{atomic::{AtomicBool, Ordering}, Arc},
+    thread,
+    time::{Duration, Instant},
 };
 
 #[derive(Parser)]
@@ -83,6 +86,8 @@ struct Target {
     env: BTreeMap<String, String>,
     #[serde(default)]
     outputs: Vec<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
     #[serde(default)]
     test: bool,
 }
@@ -212,6 +217,7 @@ fn build(manifest: &Manifest, root: &Path, selected: &str, jobs: usize) -> Resul
     }
 
     let mut completed = BTreeSet::new();
+    let cancellation = Arc::new(AtomicBool::new(false));
     let mut pending = ordered;
     while !pending.is_empty() {
         let ready: Vec<String> = pending.iter()
@@ -227,8 +233,12 @@ fn build(manifest: &Manifest, root: &Path, selected: &str, jobs: usize) -> Resul
         let results = std::thread::scope(|scope| {
             let handles: Vec<_> = ready.iter().map(|name| {
                 let name = name.clone();
+                let cancellation = Arc::clone(&cancellation);
                 scope.spawn(move || {
-                    let result = execute_target(&name, &manifest.target[&name], root);
+                    let result = execute_target(&name, &manifest.target[&name], root, &cancellation);
+                    if result.is_err() {
+                        cancellation.store(true, Ordering::SeqCst);
+                    }
                     (name, result)
                 })
             }).collect();
@@ -287,31 +297,31 @@ fn validate_action(name: &str, target: &Target) -> Result<()> {
     Ok(())
 }
 
-fn execute_target(name: &str, target: &Target, root: &Path) -> Result<()> {
+fn execute_target(name: &str, target: &Target, root: &Path, cancellation: &AtomicBool) -> Result<()> {
     println!("==> {name}");
     match target.kind.as_str() {
         "command" => {
             for command in &target.commands {
-                let status = if cfg!(target_os = "windows") {
-                    Command::new("cmd").args(["/C", command]).current_dir(root).stdin(Stdio::null()).status()?
+                let mut process = if cfg!(target_os = "windows") {
+                    Command::new("cmd").args(["/C", command]).current_dir(root).stdin(Stdio::null()).spawn()?
                 } else {
-                    Command::new("sh").args(["-c", command]).current_dir(root).stdin(Stdio::null()).status()?
+                    Command::new("sh").args(["-c", command]).current_dir(root).stdin(Stdio::null()).spawn()?
                 };
-                if !status.success() { bail!("command failed: {command}"); }
+                wait_for_process(&mut process, target.timeout_ms, cancellation)
+                    .with_context(|| format!("command failed: {command}"))?;
             }
         }
         "exec" => {
             let program = target.program.as_deref().context("missing executable program")?;
-            let status = Command::new(program)
+            let mut process = Command::new(program)
                 .args(&target.args)
                 .envs(&target.env)
                 .current_dir(root)
                 .stdin(Stdio::null())
-                .status()
+                .spawn()
                 .with_context(|| format!("starting executable '{program}'"))?;
-            if !status.success() {
-                bail!("executable '{program}' exited with status {status}");
-            }
+            wait_for_process(&mut process, target.timeout_ms, cancellation)
+                .with_context(|| format!("executable '{program}' failed"))?;
         }
         _ => unreachable!("actions are validated before execution"),
     }
@@ -322,6 +332,27 @@ fn execute_target(name: &str, target: &Target, root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn wait_for_process(child: &mut Child, timeout_ms: Option<u64>, cancellation: &AtomicBool) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        if cancellation.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("process cancelled because another build action failed");
+        }
+        if let Some(status) = child.try_wait()? {
+            if !status.success() { bail!("process exited with status {status}"); }
+            return Ok(());
+        }
+        if timeout_ms.is_some_and(|limit| started.elapsed() >= Duration::from_millis(limit)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("process exceeded timeout of {} ms", timeout_ms.unwrap());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn visit(
@@ -364,6 +395,7 @@ mod tests {
             args: Vec::new(),
             env: BTreeMap::new(),
             outputs: Vec::new(),
+            timeout_ms: None,
             test: false,
         }
     }
