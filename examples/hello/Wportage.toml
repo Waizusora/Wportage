@@ -7,15 +7,23 @@ default_target = "hello"
 out_dir = "target/wportage"
 
 [target.prepare]
-type = "command"
-commands = ["echo preparing example"]
+type = "exec"
+program = "echo"
+args = ["preparing example"]
+
+[target.docs]
+type = "exec"
+program = "echo"
+args = ["generating documentation"]
 
 [target.hello]
-type = "command"
-deps = ["prepare"]
-commands = ["echo Hello from Wportage"]
+type = "exec"
+deps = ["prepare", "docs"]
+program = "echo"
+args = ["Hello from Wportage"]
 
 [target.test]
-type = "command"
+type = "exec"
 test = true
-commands = ["echo example test passed"]
+program = "echo"
+args = ["example test passed"]
