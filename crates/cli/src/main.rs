@@ -588,14 +588,19 @@ mod tests {
     fn cancellation_kills_descendant_processes() {
         use std::{thread, time::Duration};
 
-        let pid_file = std::env::temp_dir().join(format!("wportage-descendant-{}.pid", std::process::id()));
+        let stem = format!("wportage-descendant-{}", std::process::id());
+        let pid_file = std::env::temp_dir().join(format!("{stem}.pid"));
+        let gate_file = std::env::temp_dir().join(format!("{stem}.start"));
         let script = format!(
-            "$p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -PassThru; Set-Content -Path '{}' -Value $p.Id; Wait-Process -Id $p.Id",
+            "while (!(Test-Path -LiteralPath '{}')) {{ Start-Sleep -Milliseconds 10 }}; $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -PassThru; Set-Content -Path '{}' -Value $p.Id; Wait-Process -Id $p.Id",
+            gate_file.display(),
             pid_file.display()
         );
         let mut command = Command::new("powershell.exe");
         command.args(["-NoProfile", "-Command", &script]);
         let mut process = spawn_isolated(command).unwrap();
+        // Release the parent only after spawn_isolated has attached it to the Job Object.
+        fs::write(&gate_file, "start").unwrap();
 
         for _ in 0..200 {
             if pid_file.exists() { break; }
@@ -618,6 +623,7 @@ mod tests {
         assert!(status.success(), "descendant process {descendant_pid} survived Job Object termination");
         assert!(process.child.try_wait().unwrap().is_some());
         let _ = fs::remove_file(pid_file);
+        let _ = fs::remove_file(gate_file);
     }
 
     #[cfg(target_os = "linux")]
