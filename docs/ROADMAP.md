@@ -9,12 +9,14 @@
 - [x] CI workflow
 
 ## Milestone 1 — Build engine correctness
-- [ ] Typed action model (no shell required for native actions)
-- [ ] Artifact declarations and output validation
-- [ ] Deterministic DAG validation and diagnostics
-- [ ] Parallel scheduler with resource limits
-- [ ] Process cancellation and signal propagation
-- [ ] Unit and integration test coverage
+- [x] Typed executable actions that do not require a shell
+- [x] Deterministic dependency validation and traversal
+- [x] Bounded parallel scheduling of independent targets
+- [x] Failure propagation between scheduler batches
+- [x] Unit coverage for dependency ordering, cycles, missing targets, and job limits
+- [ ] Declared artifact outputs and output validation
+- [ ] Process-tree cancellation and signal propagation
+- [ ] Integration tests for parallel execution and failure behavior
 
 ## Milestone 2 — Toolchains
 - [ ] C and C++ compiler toolchains
