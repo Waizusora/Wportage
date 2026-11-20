@@ -465,6 +465,25 @@ mod tests {
         assert_eq!(validate_output_path("compile", "obj/main.o").unwrap(), PathBuf::from("obj/main.o"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn process_timeout_kills_child() {
+        let mut child = Command::new("sleep").arg("2").spawn().unwrap();
+        let error = wait_for_process(&mut child, Some(10), &AtomicBool::new(false)).unwrap_err();
+        assert!(error.to_string().contains("timeout"));
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_stops_a_running_child() {
+        let mut child = Command::new("sleep").arg("2").spawn().unwrap();
+        let cancellation = AtomicBool::new(true);
+        let error = wait_for_process(&mut child, None, &cancellation).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
     #[test]
     fn shell_action_requires_commands() {
         let action = Target {
