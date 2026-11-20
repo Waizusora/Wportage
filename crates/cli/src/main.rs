@@ -167,6 +167,9 @@ fn build(manifest: &Manifest, root: &Path, selected: &str) -> Result<()> {
     visit(selected, manifest, &mut visiting, &mut visited, &mut ordered)?;
     for name in ordered {
         let target = &manifest.target[&name];
+        if target.kind != "command" {
+            bail!("unsupported target type for {name}: {}; this release supports command", target.kind);
+        }
         println!("==> {name}");
         for command in &target.commands {
             let status = if cfg!(target_os = "windows") {
