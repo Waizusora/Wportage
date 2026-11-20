@@ -349,7 +349,7 @@ fn spawn_isolated(mut command: Command) -> Result<Child> {
 }
 
 #[cfg(not(unix))]
-fn spawn_isolated(command: Command) -> Result<Child> {
+fn spawn_isolated(mut command: Command) -> Result<Child> {
     Ok(command.spawn()?)
 }
 
