@@ -19,7 +19,9 @@
 - [x] CLI integration coverage for concurrent independent targets
 - [x] CLI integration coverage for dependency execution order
 - [x] CLI integration coverage for failure cancellation and missing outputs (Unix)
-- [ ] Process-tree cancellation and signal propagation (Unix process groups / Windows job objects)
+- [x] Unix process-group cancellation on action failure and timeout
+- [ ] Windows Job Object process-tree cancellation
+- [ ] Graceful signal propagation and configurable shutdown grace periods
 - [ ] Cross-platform scheduler integration coverage (Windows)
 
 ## Milestone 2 — Toolchains
