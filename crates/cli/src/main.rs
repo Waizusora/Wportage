@@ -82,6 +82,8 @@ struct Target {
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
+    outputs: Vec<String>,
+    #[serde(default)]
     test: bool,
 }
 
@@ -194,8 +196,19 @@ fn build(manifest: &Manifest, root: &Path, selected: &str, jobs: usize) -> Resul
     let mut visited = BTreeSet::new();
     visit(selected, manifest, &mut visiting, &mut visited, &mut ordered)?;
 
+    let mut declared_outputs: Vec<(String, PathBuf)> = Vec::new();
     for name in &ordered {
-        validate_action(name, &manifest.target[name])?;
+        let target = &manifest.target[name];
+        validate_action(name, target)?;
+        for output in &target.outputs {
+            let path = validate_output_path(name, output)?;
+            for (owner, existing) in &declared_outputs {
+                if path == *existing || path.starts_with(existing) || existing.starts_with(&path) {
+                    bail!("output conflict: target '{name}' declares '{output}', overlapping output of target '{owner}' ({} )", existing.display());
+                }
+            }
+            declared_outputs.push((name.clone(), path));
+        }
     }
 
     let mut completed = BTreeSet::new();
@@ -237,6 +250,16 @@ fn build(manifest: &Manifest, root: &Path, selected: &str, jobs: usize) -> Resul
     Ok(())
 }
 
+fn validate_output_path(target: &str, output: &str) -> Result<PathBuf> {
+    let path = Path::new(output);
+    if output.trim().is_empty() || path.is_absolute() || path.components().any(|component| {
+        matches!(component, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_))
+    }) {
+        bail!("target '{target}' declares unsafe output path '{output}'; outputs must stay inside the project directory");
+    }
+    Ok(path.to_path_buf())
+}
+
 fn validate_action(name: &str, target: &Target) -> Result<()> {
     match target.kind.as_str() {
         "command" => {
@@ -257,6 +280,9 @@ fn validate_action(name: &str, target: &Target) -> Result<()> {
             }
         }
         other => bail!("unsupported target type for {name}: {other}; supported types are command and exec"),
+    }
+    for output in &target.outputs {
+        validate_output_path(name, output)?;
     }
     Ok(())
 }
@@ -288,6 +314,12 @@ fn execute_target(name: &str, target: &Target, root: &Path) -> Result<()> {
             }
         }
         _ => unreachable!("actions are validated before execution"),
+    }
+    for output in &target.outputs {
+        let path = root.join(output);
+        if !path.exists() {
+            bail!("declared output '{output}' was not produced");
+        }
     }
     Ok(())
 }
@@ -331,6 +363,7 @@ mod tests {
             program: Some("true".into()),
             args: Vec::new(),
             env: BTreeMap::new(),
+            outputs: Vec::new(),
             test: false,
         }
     }
@@ -390,6 +423,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_absolute_and_parent_output_paths() {
+        assert!(validate_output_path("compile", "/tmp/out.o").is_err());
+        assert!(validate_output_path("compile", "../out.o").is_err());
+    }
+
+    #[test]
+    fn accepts_workspace_relative_output_paths() {
+        assert_eq!(validate_output_path("compile", "obj/main.o").unwrap(), PathBuf::from("obj/main.o"));
+    }
+
+    #[test]
     fn shell_action_requires_commands() {
         let action = Target {
             kind: "command".into(),
@@ -398,6 +442,7 @@ mod tests {
             program: None,
             args: Vec::new(),
             env: BTreeMap::new(),
+            outputs: Vec::new(),
             test: false,
         };
         let error = validate_action("broken", &action).unwrap_err();
