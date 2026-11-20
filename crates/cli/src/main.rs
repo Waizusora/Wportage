@@ -22,8 +22,6 @@ enum Commands {
     /// Build a target (defaults to the manifest's default target).
     Build {
         target: Option<String>,
-        #[arg(short = 'j', long, default_value_t = 1)]
-        jobs: usize,
     },
     /// Run the manifest's test target, or all targets marked as tests.
     Test,
@@ -85,8 +83,7 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Init { path } => init(path.unwrap_or_else(|| PathBuf::from("."))),
-        Commands::Build { target, jobs } => {
-            if jobs == 0 { bail!("-j/--jobs must be greater than zero"); }
+        Commands::Build { target } => {
             let (manifest, root) = load_manifest()?;
             let selected = target.unwrap_or_else(|| manifest.project.default_target.clone());
             build(&manifest, &root, &selected)
