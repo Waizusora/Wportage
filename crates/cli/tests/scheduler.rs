@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::{
     fs,
     path::PathBuf,
@@ -7,12 +8,15 @@ use std::{
 #[cfg(unix)]
 use std::{path::Path, time::{Duration, Instant}};
 
+#[cfg(unix)]
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(unix)]
 struct Fixture {
     root: PathBuf,
 }
 
+#[cfg(unix)]
 impl Fixture {
     fn new() -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -41,6 +45,7 @@ impl Fixture {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
