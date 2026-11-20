@@ -347,7 +347,7 @@ fn spawn_isolated(mut command: Command) -> Result<Child> {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    command.spawn()
+    Ok(command.spawn()?)
 }
 
 fn terminate_process_tree(child: &mut Child) {
