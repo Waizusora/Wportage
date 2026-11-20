@@ -4,7 +4,7 @@ Wportage is a Rust-native build and package infrastructure. The first implementa
 
 ## Design rules
 
-1. The native Wportage engine must not require GNU Make, Ninja, or CMake.
+1. The native Wportage engine must not require Another engine.
 2. Build descriptions are declarative and versioned.
 3. The build graph is validated before actions execute.
 4. Execution must be deterministic where inputs and toolchains are fixed.
