@@ -1,0 +1,21 @@
+[project]
+name = "hello"
+version = "0.1.0"
+default_target = "hello"
+
+[build]
+out_dir = "target/wportage"
+
+[target.prepare]
+type = "command"
+commands = ["echo preparing example"]
+
+[target.hello]
+type = "command"
+deps = ["prepare"]
+commands = ["echo Hello from Wportage"]
+
+[target.test]
+type = "command"
+test = true
+commands = ["echo example test passed"]
