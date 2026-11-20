@@ -1,20 +1,27 @@
 # Wportage Architecture
 
-Wportage is a Rust-native build and package infrastructure. The first implementation intentionally keeps the user interface small while separating the long-term engine into clear subsystems.
+Wportage is a Rust-native build and package infrastructure. The user interface stays small while the engine is divided into explicit subsystems.
 
 ## Design rules
 
-1. The native Wportage engine must not require Another engine.
+1. The native Wportage engine must not require another build engine.
 2. Build descriptions are declarative and versioned.
-3. The build graph is validated before actions execute.
-4. Execution must be deterministic where inputs and toolchains are fixed.
-5. Cache entries are keyed by declared inputs, command, environment, and toolchain identity.
+3. The reachable build graph is validated before actions execute.
+4. Ready actions are scheduled deterministically within a bounded concurrency limit.
+5. Cache entries will be keyed by declared inputs, action, environment, and toolchain identity.
 6. Package resolution must produce a committed lockfile before reproducible package builds are considered stable.
-7. Shell command targets are an escape hatch, not the long-term typed action interface.
+7. Shell command targets are an escape hatch; typed executable actions are preferred.
 
-## Initial implementation
+## Current execution model
 
-The current CLI parses `Wportage.toml`, validates target references and cycles, topologically orders dependencies, then executes command actions directly using the host command interpreter. This is a bootstrap executor, not yet a hermetic or parallel build engine.
+The CLI parses `Wportage.toml`, validates target references and cycles, and computes a deterministic dependency-first order. The scheduler selects ready targets in stable name order and runs up to `jobs` targets concurrently. It waits for the current batch before scheduling dependents. A failure prevents later batches from starting; peers already running in the failed batch are joined.
+
+Two action types are currently supported:
+
+- `exec`: starts a program directly with an argument vector and declared environment variables. No shell parsing is involved.
+- `command`: executes shell command strings through the host command interpreter. This is intentionally retained as an escape hatch.
+
+The current executor does not yet model declared outputs, cache keys, incremental state, process groups, sandbox policies, or toolchain identities. Parallel scheduling is not a claim of hermetic or reproducible execution.
 
 ## Planned subsystem boundaries
 
