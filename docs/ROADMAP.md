@@ -16,8 +16,11 @@
 - [x] Unit coverage for dependency ordering, cycles, missing targets, and job limits
 - [x] Declared artifact outputs and output validation
 - [x] Direct-child timeout, cancellation, and reaping
+- [x] CLI integration coverage for concurrent independent targets
+- [x] CLI integration coverage for dependency execution order
+- [x] CLI integration coverage for failure cancellation and missing outputs (Unix)
 - [ ] Process-tree cancellation and signal propagation (Unix process groups / Windows job objects)
-- [ ] Integration tests for parallel execution and failure behavior
+- [ ] Cross-platform scheduler integration coverage (Windows)
 
 ## Milestone 2 — Toolchains
 - [ ] C and C++ compiler toolchains
