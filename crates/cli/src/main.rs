@@ -375,4 +375,32 @@ mod tests {
         let error = build(&manifest, Path::new("."), "app", 0).unwrap_err();
         assert!(error.to_string().contains("jobs"));
     }
+
+    #[test]
+    fn default_build_directory_is_defined() {
+        assert_eq!(BuildConfig::default().out_dir, "target/wportage");
+    }
+
+    #[test]
+    fn exec_action_requires_a_program() {
+        let mut action = target(&[]);
+        action.program = None;
+        let error = validate_action("broken", &action).unwrap_err();
+        assert!(error.to_string().contains("no program"));
+    }
+
+    #[test]
+    fn shell_action_requires_commands() {
+        let action = Target {
+            kind: "command".into(),
+            deps: Vec::new(),
+            commands: Vec::new(),
+            program: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            test: false,
+        };
+        let error = validate_action("broken", &action).unwrap_err();
+        assert!(error.to_string().contains("no commands"));
+    }
 }
