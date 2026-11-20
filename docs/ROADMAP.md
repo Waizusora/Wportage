@@ -15,7 +15,8 @@
 - [x] Failure propagation between scheduler batches
 - [x] Unit coverage for dependency ordering, cycles, missing targets, and job limits
 - [x] Declared artifact outputs and output validation
-- [ ] Process-tree cancellation and signal propagation
+- [x] Direct-child timeout, cancellation, and reaping
+- [ ] Process-tree cancellation and signal propagation (Unix process groups / Windows job objects)
 - [ ] Integration tests for parallel execution and failure behavior
 
 ## Milestone 2 — Toolchains
