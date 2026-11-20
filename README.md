@@ -2,7 +2,7 @@
 
 **Wicofe Portage** is a native Rust build and package infrastructure project for the Wicofe ecosystem.
 
-Wportage is designed around a small, memorable CLI and an independent build engine. It does not require GNU Make, Ninja, or CMake to execute native Wportage build tasks.
+Wportage is designed around a small, memorable CLI and an independent build engine.
 
 ## Status
 
