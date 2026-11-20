@@ -580,7 +580,7 @@ mod tests {
         let cancellation = AtomicBool::new(true);
         let error = wait_for_process(&mut child, None, &cancellation).unwrap_err();
         assert!(error.to_string().contains("cancelled"));
-        assert!(child.try_wait().unwrap().is_some());
+        assert!(child.child.try_wait().unwrap().is_some());
     }
 
     #[cfg(windows)]
