@@ -14,7 +14,7 @@
 - [x] Bounded parallel scheduling of independent targets
 - [x] Failure propagation between scheduler batches
 - [x] Unit coverage for dependency ordering, cycles, missing targets, and job limits
-- [ ] Declared artifact outputs and output validation
+- [x] Declared artifact outputs and output validation
 - [ ] Process-tree cancellation and signal propagation
 - [ ] Integration tests for parallel execution and failure behavior
 
