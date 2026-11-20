@@ -341,44 +341,109 @@ fn execute_target(name: &str, target: &Target, root: &Path, cancellation: &Atomi
     Ok(())
 }
 
+struct ManagedChild {
+    child: Child,
+    #[cfg(windows)]
+    job: std::os::windows::io::OwnedHandle,
+}
+
 #[cfg(unix)]
-fn spawn_isolated(mut command: Command) -> Result<Child> {
+fn spawn_isolated(mut command: Command) -> Result<ManagedChild> {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
-    Ok(command.spawn()?)
+    Ok(ManagedChild { child: command.spawn()? })
 }
 
-#[cfg(not(unix))]
-fn spawn_isolated(mut command: Command) -> Result<Child> {
-    Ok(command.spawn()?)
+#[cfg(windows)]
+fn spawn_isolated(mut command: Command) -> Result<ManagedChild> {
+    use std::{
+        mem::size_of,
+        os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    let mut child = command.spawn()?;
+    // SAFETY: the returned handle is checked and immediately wrapped in OwnedHandle.
+    let raw_job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if raw_job.is_null() {
+        let error = std::io::Error::last_os_error();
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error.into());
+    }
+    // SAFETY: CreateJobObjectW returned a new owned kernel handle.
+    let job = unsafe { OwnedHandle::from_raw_handle(raw_job.cast()) };
+    // SAFETY: zero is the documented initial state for this Win32 information structure.
+    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+    // SAFETY: the structure remains valid for the duration of the Win32 call.
+    let configured = unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle() as _,
+            JobObjectExtendedLimitInformation,
+            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    // SAFETY: Child owns a live process handle until it is waited/reaped.
+    let assigned = configured != 0
+        && unsafe { AssignProcessToJobObject(job.as_raw_handle() as _, child.as_raw_handle() as _) } != 0;
+    if !assigned {
+        let error = std::io::Error::last_os_error();
+        drop(job);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error.into());
+    }
+
+    Ok(ManagedChild { child, job })
 }
 
-fn terminate_process_tree(child: &mut Child) {
+#[cfg(not(any(unix, windows)))]
+fn spawn_isolated(mut command: Command) -> Result<ManagedChild> {
+    Ok(ManagedChild { child: command.spawn()? })
+}
+
+fn terminate_process_tree(process: &mut ManagedChild) {
     #[cfg(unix)]
     {
-        let process_group = child.id() as i32;
+        let process_group = process.child.id() as i32;
         // Each action owns a fresh process group; signal only that target's tree.
         unsafe {
             libc::kill(-process_group, libc::SIGKILL);
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        // SAFETY: the job handle is owned by this ManagedChild and remains live.
+        unsafe {
+            TerminateJobObject(process.job.as_raw_handle() as _, 1);
+        }
+    }
+    let _ = process.child.kill();
+    let _ = process.child.wait();
 }
 
-fn wait_for_process(child: &mut Child, timeout_ms: Option<u64>, cancellation: &AtomicBool) -> Result<()> {
+fn wait_for_process(process: &mut ManagedChild, timeout_ms: Option<u64>, cancellation: &AtomicBool) -> Result<()> {
     let started = Instant::now();
     loop {
         if cancellation.load(Ordering::SeqCst) {
-            terminate_process_tree(child);
+            terminate_process_tree(process);
             bail!("process tree cancelled because another build action failed");
         }
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = process.child.try_wait()? {
             if !status.success() { bail!("process exited with status {status}"); }
             return Ok(());
         }
         if timeout_ms.is_some_and(|limit| started.elapsed() >= Duration::from_millis(limit)) {
-            terminate_process_tree(child);
+            terminate_process_tree(process);
             bail!("process tree exceeded timeout of {} ms", timeout_ms.unwrap());
         }
         thread::sleep(Duration::from_millis(10));
@@ -503,7 +568,7 @@ mod tests {
         let mut child = spawn_isolated(command).unwrap();
         let error = wait_for_process(&mut child, Some(10), &AtomicBool::new(false)).unwrap_err();
         assert!(error.to_string().contains("timeout"));
-        assert!(child.try_wait().unwrap().is_some());
+        assert!(child.child.try_wait().unwrap().is_some());
     }
 
     #[cfg(unix)]
@@ -516,6 +581,44 @@ mod tests {
         let error = wait_for_process(&mut child, None, &cancellation).unwrap_err();
         assert!(error.to_string().contains("cancelled"));
         assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancellation_kills_descendant_processes() {
+        use std::{os::windows::io::AsRawHandle, thread, time::Duration};
+
+        let pid_file = std::env::temp_dir().join(format!("wportage-descendant-{}.pid", std::process::id()));
+        let script = format!(
+            "$p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -PassThru; Set-Content -Path '{}' -Value $p.Id; Wait-Process -Id $p.Id",
+            pid_file.display()
+        );
+        let mut command = Command::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", &script]);
+        let mut process = spawn_isolated(command).unwrap();
+
+        for _ in 0..200 {
+            if pid_file.exists() { break; }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let descendant_pid = fs::read_to_string(&pid_file)
+            .expect("descendant process should publish its PID")
+            .trim()
+            .to_string();
+        let error = wait_for_process(&mut process, None, &AtomicBool::new(true)).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+
+        let probe = format!(
+            "if (Get-Process -Id {descendant_pid} -ErrorAction SilentlyContinue) {{ exit 1 }} else {{ exit 0 }}"
+        );
+        let status = Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &probe])
+            .status()
+            .unwrap();
+        assert!(status.success(), "descendant process {descendant_pid} survived Job Object termination");
+        assert!(process.child.try_wait().unwrap().is_some());
+        let _ = fs::remove_file(pid_file);
+        let _ = process.child.as_raw_handle();
     }
 
     #[cfg(target_os = "linux")]
