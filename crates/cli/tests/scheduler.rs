@@ -1,10 +1,11 @@
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command, Output},
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant},
 };
+#[cfg(unix)]
+use std::{path::Path, time::{Duration, Instant}};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
