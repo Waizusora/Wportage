@@ -341,12 +341,15 @@ fn execute_target(name: &str, target: &Target, root: &Path, cancellation: &Atomi
     Ok(())
 }
 
+#[cfg(unix)]
 fn spawn_isolated(mut command: Command) -> Result<Child> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+    Ok(command.spawn()?)
+}
+
+#[cfg(not(unix))]
+fn spawn_isolated(command: Command) -> Result<Child> {
     Ok(command.spawn()?)
 }
 
