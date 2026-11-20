@@ -494,6 +494,7 @@ mod tests {
             args: Vec::new(),
             env: BTreeMap::new(),
             outputs: Vec::new(),
+            timeout_ms: None,
             test: false,
         };
         let error = validate_action("broken", &action).unwrap_err();
