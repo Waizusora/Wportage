@@ -586,7 +586,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn cancellation_kills_descendant_processes() {
-        use std::{os::windows::io::AsRawHandle, thread, time::Duration};
+        use std::{thread, time::Duration};
 
         let pid_file = std::env::temp_dir().join(format!("wportage-descendant-{}.pid", std::process::id()));
         let script = format!(
@@ -618,7 +618,6 @@ mod tests {
         assert!(status.success(), "descendant process {descendant_pid} survived Job Object termination");
         assert!(process.child.try_wait().unwrap().is_some());
         let _ = fs::remove_file(pid_file);
-        let _ = process.child.as_raw_handle();
     }
 
     #[cfg(target_os = "linux")]
