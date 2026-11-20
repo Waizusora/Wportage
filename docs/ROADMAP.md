@@ -22,6 +22,7 @@
 - [x] Unix process-group cancellation on action failure and timeout
 - [x] Windows Job Object process-tree cancellation and kill-on-close cleanup
 - [x] Windows unit coverage for terminating descendant processes
+- [ ] Windows suspended process creation and resume to eliminate the pre-assignment race
 - [ ] Graceful signal propagation and configurable shutdown grace periods
 - [ ] Cross-platform scheduler integration coverage (Windows)
 
