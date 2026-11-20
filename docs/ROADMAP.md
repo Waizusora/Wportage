@@ -4,7 +4,7 @@
 - [x] Rust workspace and CLI crate
 - [x] Initial manifest parser
 - [x] Target dependency ordering and cycle detection
-- [x] Native command execution without Make/Ninja/CMake
+- [x] Native command execution without external executor
 - [x] Basic init/build/test/clean/graph/doctor commands
 - [x] CI workflow
 
